@@ -19,9 +19,9 @@ background-image: linear-gradient(to right top, #fdfcfb, #e2d1c3);
 [data-testid="stHeader"] {
 background-color: rgba(0,0,0,0);
 }
-/* Stylizacja przycisku usuwania na czerwono (opcjonalnie) */
-div.stButton > button:first-child {
-    font-weight: bold;
+/* Stylizacja przycisków w ekspanderach */
+div.stButton > button {
+    width: 100%;
 }
 </style>
 """
@@ -45,6 +45,16 @@ def init_connection():
 supabase = init_connection()
 
 # --- Funkcje Pomocnicze ---
+def get_categories_data():
+    """Pobiera kategorie jako listę słowników (bez cache dla delete)"""
+    response = supabase.table("kategorie").select("id, nazwa").order("nazwa").execute()
+    return response.data if response.data else []
+
+def get_products_data():
+    """Pobiera produkty jako listę słowników (bez cache dla delete)"""
+    response = supabase.table("produkty").select("id, nazwa").order("nazwa").execute()
+    return response.data if response.data else []
+
 @st.cache_data(ttl=60)
 def get_categories_df():
     response = supabase.table("kategorie").select("id, nazwa").execute()
@@ -66,7 +76,6 @@ def get_products_flattened():
             flat_data.append(flat_item)
         
         df = pd.DataFrame(flat_data)
-        # Zabezpieczenie przed brakiem kolumn jeśli tabela jest pusta, ale są metadane
         if not df.empty:
             df = df[['id', 'nazwa', 'kategoria', 'liczba', 'cena']]
         return df
@@ -74,13 +83,12 @@ def get_products_flattened():
 
 # --- Interfejs Użytkownika ---
 
-# Dodaliśmy nową zakładkę "Administracja" na końcu
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "➕ Dodaj Produkt", 
     "➕ Dodaj Kategorię", 
     "👀 Podgląd Danych", 
     "📊 Statystyki",
-    "⚙️ Administracja"
+    "⚙️ Zarządzanie"
 ])
 
 # Pobieramy dane globalnie dla zakładek podglądu
@@ -175,30 +183,86 @@ with tab4:
             chart_data.columns = ['Kategoria', 'Liczba produktów']
             st.bar_chart(chart_data, x="Kategoria", y="Liczba produktów", color="#FF4B4B", use_container_width=True)
 
-# === TAB 5: ADMINISTRACJA (NOWOŚĆ) ===
+# === TAB 5: ZARZĄDZANIE I USUWANIE ===
 with tab5:
-    st.header("⚠️ Strefa Niebezpieczna")
-    st.markdown("Tutaj możesz zarządzać całą bazą danych. Uważaj, te operacje są nieodwracalne!")
+    st.header("⚙️ Zarządzanie zasobami")
     
+    col_mgmt_1, col_mgmt_2 = st.columns(2)
+    
+    # --- SEKCJA 1: USUWANIE PRODUKTÓW ---
+    with col_mgmt_1:
+        st.info("🗑️ **Usuwanie produktów**")
+        all_products = get_products_data()
+        
+        if not all_products:
+            st.write("Brak produktów do usunięcia.")
+        else:
+            # Tworzymy słownik { "ID: Nazwa" : ID } dla selectboxa
+            prod_options = {f"{p['id']}: {p['nazwa']}": p['id'] for p in all_products}
+            
+            selected_prods_to_del = st.multiselect(
+                "Wybierz produkty do usunięcia:",
+                options=list(prod_options.keys())
+            )
+            
+            if st.button("Usuń wybrane produkty"):
+                if not selected_prods_to_del:
+                    st.warning("Wybierz przynajmniej jeden produkt.")
+                else:
+                    try:
+                        # Pobieramy listę ID do usunięcia
+                        ids_to_delete = [prod_options[name] for name in selected_prods_to_del]
+                        
+                        # Supabase 'in_' pozwala usunąć wiele ID na raz
+                        supabase.table("produkty").delete().in_("id", ids_to_delete).execute()
+                        
+                        st.success(f"Usunięto {len(ids_to_delete)} produktów.")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Błąd: {e}")
+
+    # --- SEKCJA 2: USUWANIE KATEGORII ---
+    with col_mgmt_2:
+        st.info("📂 **Usuwanie kategorii**")
+        all_cats = get_categories_data()
+        
+        if not all_cats:
+            st.write("Brak kategorii.")
+        else:
+            cat_options = {f"{c['nazwa']}": c['id'] for c in all_cats}
+            
+            selected_cat_to_del = st.selectbox(
+                "Wybierz kategorię do usunięcia:",
+                options=list(cat_options.keys())
+            )
+            
+            if st.button("Usuń kategorię"):
+                try:
+                    cat_id = cat_options[selected_cat_to_del]
+                    supabase.table("kategorie").delete().eq("id", cat_id).execute()
+                    
+                    st.success(f"Usunięto kategorię: {selected_cat_to_del}")
+                    st.cache_data.clear() # Czyścimy cache, bo lista kategorii się zmieniła
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    # Supabase zwróci błąd, jeśli kategoria ma przypisane produkty (Foreign Key)
+                    st.error("❌ Nie można usunąć tej kategorii!")
+                    st.warning("Prawdopodobnie istnieją produkty przypisane do tej kategorii. Usuń je najpierw lub przenieś do innej kategorii.")
+
     st.divider()
     
-    col_danger, col_info = st.columns([1, 2])
-    
-    with col_danger:
-        st.subheader("Reset Magazynu")
-        st.error("Ta akcja usunie **WSZYSTKIE** produkty z bazy danych. Kategorie pozostaną bez zmian.")
+    # --- SEKCJA 3: STREFA NIEBEZPIECZNA ---
+    with st.expander("🔥 Strefa Niebezpieczna (Reset Bazy)"):
+        st.error("Ta akcja usunie **WSZYSTKIE** produkty z bazy danych.")
+        confirm_delete = st.checkbox("Rozumiem ryzyko i chcę wyczyścić cały magazyn")
         
-        # Checkbox zabezpieczający (Confirmation toggle)
-        confirm_delete = st.checkbox("Rozumiem ryzyko i chcę usunąć wszystko")
-        
-        # Przycisk aktywny tylko po zaznaczeniu checkboxa
-        if st.button("🔥 WYCZYŚĆ MAGAZYN", disabled=not confirm_delete):
+        if st.button("WYCZYŚĆ CAŁY MAGAZYN", disabled=not confirm_delete):
             try:
-                # 'neq' (not equal) id != -1 oznacza "wszystkie rekordy", bo id są zawsze dodatnie
                 supabase.table("produkty").delete().neq("id", -1).execute()
-                
                 st.toast("Magazyn został wyczyszczony!", icon="🗑️")
                 time.sleep(1.5)
                 st.rerun()
             except Exception as e:
-                st.error(f"Wystąpił błąd podczas usuwania: {e}")
+                st.error(f"Wystąpił błąd: {e}")
